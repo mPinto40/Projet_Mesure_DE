@@ -12,6 +12,9 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <chrono>
+#include <unistd.h>    // Pour execvp
+#include <cstring>     // Pour strerror
 
 using json = nlohmann::json;
 using namespace std;
@@ -22,10 +25,13 @@ public:
     MqttClient(const string& clientId, const string& mqttHost, int mqttPort,
                const string& dbHost, const string& dbUser, const string& dbPassword, const string& dbName)
         : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort),
-          dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName) {
+          dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName),
+          mysql_(nullptr, mysql_close)
+    {
         connectToMqttBroker();
         startMqttLoop();
         connectToDatabase();
+        lastMessageTime_ = chrono::system_clock::now();
     }
 
     ~MqttClient()
@@ -40,7 +46,9 @@ public:
     void on_connect(int rc) override;
     void on_message(const struct mosquitto_message* message) override;
 
-    void insertProtocolDataIntoDatabase(int id, const string& protocolName);
+    chrono::system_clock::time_point getLastMessageTime() const {
+        return lastMessageTime_;
+    }
 
 private:
     string mqttHost_;
@@ -49,8 +57,9 @@ private:
     string dbUser_;
     string dbPassword_;
     string dbName_;
-    unique_ptr<MYSQL, decltype(&mysql_close)> mysql_{nullptr, mysql_close};
+    unique_ptr<MYSQL, decltype(&mysql_close)> mysql_;
     unordered_map<string, optional<double>> lastLoadValuesKwh_;
+    chrono::system_clock::time_point lastMessageTime_;
 
     void connectToMqttBroker();
     void startMqttLoop();
@@ -71,21 +80,16 @@ private:
 vector<pair<string, int>> MqttClient::getGatewayNamesAndProtocolsFromDatabase()
 {
     vector<pair<string, int>> gatewayProtocols;
-
     string query = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
     mysql_query(mysql_.get(), query.c_str());
 
     MYSQL_RES* result = mysql_store_result(mysql_.get());
-    if (result)
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(result)))
     {
-        MYSQL_ROW row;
-        while ((row = mysql_fetch_row(result)))
-        {
-            gatewayProtocols.emplace_back(row[0], stoi(row[1]));
-        }
-        mysql_free_result(result);
+        gatewayProtocols.emplace_back(row[0], stoi(row[1]));
     }
-
+    mysql_free_result(result);
     return gatewayProtocols;
 }
 
@@ -103,11 +107,10 @@ void MqttClient::on_connect(int rc)
             {
                 string topic = "energy/consumption/" + gatewayName + "/message/data/71435500-6791-11ce-97c6-313131303230";
                 subscribe(nullptr, topic.c_str());
-                cout << "Abonné au sujet : " << topic << endl;
             }
             else
             {
-                cout << "Passerelle " << gatewayName << " ignorée en raison de ID_Protocole_FK = " << protocolId << endl;
+                cout << "Passerelle " << gatewayName << " ignoree en raison de ID_Protocole_FK = " << protocolId << endl;
             }
         }
     }
@@ -121,6 +124,7 @@ void MqttClient::on_message(const struct mosquitto_message* message)
     if (isRelevantTopic(topic))
     {
         processIncomingMessage(topic, payload);
+        lastMessageTime_ = chrono::system_clock::now();
     }
 }
 
@@ -168,17 +172,14 @@ void MqttClient::processIncomingMessage(const string& topic, const string& paylo
 
 void MqttClient::displayMessageInTerminal(const string& payload)
 {
-    try {
+    if (json::accept(payload))
+    {
         auto jsonData = json::parse(payload);
 
         if (jsonData.contains("utctimestamp"))
         {
-            time_t time = jsonData["utctimestamp"];
-            cout << "UTC Timestamp: " << put_time(gmtime(&time), "%Y-%m-%d %H:%M:%S") << endl;
-        }
-        else
-        {
-            cout << "UTC Timestamp non disponible." << endl;
+            time_t timeVal = jsonData["utctimestamp"];
+            cout << "UTC Timestamp: " << put_time(gmtime(&timeVal), "%Y-%m-%d %H:%M:%S") << endl;
         }
 
         if (jsonData["measures"].contains("Load_0_30001"))
@@ -186,54 +187,45 @@ void MqttClient::displayMessageInTerminal(const string& payload)
             double loadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
             cout << "Load_0_30001: " << loadValueKWh << " kWh" << endl;
         }
-        else
-        {
-            cout << "Load_0_30001 non disponible." << endl;
-        }
-    }
-    catch (const json::parse_error& e)
-    {
-        cerr << "Erreur d'analyse JSON : " << e.what() << endl;
     }
 }
 
 void MqttClient::insertMessageDataIntoDatabase(const string& topic, const string& payload)
 {
-    try
+    auto jsonData = json::parse(payload);
+
+    time_t utcTimestamp = jsonData["utctimestamp"];
+    double currentLoadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
+
+    string gatewayName = extractGatewayNameFromTopic(topic);
+    int deviceId = getDeviceIdFromDatabase(gatewayName);
+
+    if (deviceId == -1)
     {
-        auto jsonData = json::parse(payload);
-        if (jsonData.contains("utctimestamp") && jsonData["measures"].contains("Load_0_30001"))
-        {
-            time_t utcTimestamp = jsonData["utctimestamp"];
-            double currentLoadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
-
-            string gatewayName = extractGatewayNameFromTopic(topic);
-            int deviceId = getDeviceIdFromDatabase(gatewayName);
-
-            if (lastLoadValuesKwh_[gatewayName] && deviceId != -1)
-            {
-                double differenceKWh = currentLoadValueKWh - *lastLoadValuesKwh_[gatewayName];
-                stringstream queryStream;
-                queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
-                            << utcTimestamp << "), " << differenceKWh << ", " << deviceId << ")";
-                string query = queryStream.str();
-
-                mysql_query(mysql_.get(), query.c_str());
-                cout << "Données insérées dans la base de données." << endl;
-                cout << "==============================" << endl;
-            }
-            else
-            {
-                cout << "Première valeur reçue ou ID du dispositif non trouvé, pas d'insertion dans la base de données." << endl;
-                cout << "===================================================" << endl;
-            }
-
-            lastLoadValuesKwh_[gatewayName] = currentLoadValueKWh;
-        }
-    } catch (const json::parse_error& e)
-    {
-        cerr << "Erreur d'analyse JSON pour l'insertion dans la base de données : " << e.what() << endl;
+        return;
     }
+
+    if (lastLoadValuesKwh_.count(gatewayName))
+    {
+        double differenceKWh = currentLoadValueKWh - lastLoadValuesKwh_[gatewayName].value();
+
+        stringstream queryStream;
+        queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
+                    << utcTimestamp << "), " << differenceKWh << ", " << deviceId << ")";
+
+        const string& query = queryStream.str();
+        mysql_query(mysql_.get(), query.c_str());
+
+        cout << "Donnees inserees dans la bdd." << endl;
+        cout << "==============================" << endl;
+    }
+    else
+    {
+        cout << "Premiere valeur recue pour " << gatewayName << ", insertion ignoree." << endl;
+        cout << "===================================================" << endl;
+    }
+
+    lastLoadValuesKwh_[gatewayName] = currentLoadValueKWh;
 }
 
 string MqttClient::extractGatewayNameFromTopic(const string& topic)
@@ -245,22 +237,21 @@ string MqttClient::extractGatewayNameFromTopic(const string& topic)
 
 int MqttClient::getDeviceIdFromDatabase(const string& gatewayName)
 {
-    int deviceId = -1;
-
     string query = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + gatewayName + "' LIMIT 1";
     mysql_query(mysql_.get(), query.c_str());
-
     MYSQL_RES* result = mysql_store_result(mysql_.get());
-    if (result && mysql_num_rows(result) > 0)
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (!row)
     {
-        MYSQL_ROW row = mysql_fetch_row(result);
-        deviceId = stoi(row[0]);
+        mysql_free_result(result);
+        return -1;
     }
-
+    int deviceId = stoi(row[0]);
     mysql_free_result(result);
     return deviceId;
 }
 
+// Variable globale de contrôle du programme
 volatile sig_atomic_t running = 1;
 
 void signalHandler(int sig)
@@ -268,7 +259,7 @@ void signalHandler(int sig)
     running = 0;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
     signal(SIGINT, signalHandler);
 
@@ -281,11 +272,29 @@ int main()
     const string dbPassword = "admin";
     const string dbName = "Mesure_De";
 
+    cout << "Demarrage du client MQTT..." << endl;
     MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbHost, dbUser, dbPassword, dbName);
 
     while (running)
     {
         this_thread::sleep_for(chrono::seconds(1));
+
+        auto now = chrono::system_clock::now();
+        auto lastMessageTime = mqttClient.getLastMessageTime();
+        auto duration = chrono::duration_cast<chrono::seconds>(now - lastMessageTime);
+
+        cout << "Secondes sans message : " << duration.count() << endl;
+
+        if (duration.count() > 60)
+        {
+            cout << "Aucun message recu depuis 1 minute, redemarrage complet du programme..." << endl;
+            // Remplacement de l'image du processus par une nouvelle instance du programme
+            execvp(argv[0], argv);
+            
+            // Si execvp échoue, on affiche l'erreur et on sort de la boucle
+            cerr << "Erreur lors du redemarrage : " << strerror(errno) << endl;
+            break;
+        }
     }
 
     return 0;
