@@ -13,8 +13,8 @@
 #include <vector>
 #include <unordered_map>
 #include <chrono>
-#include <unistd.h>    // Pour execvp
-#include <cstring>     // Pour strerror
+#include <unistd.h>
+#include <cstring>
 
 using json = nlohmann::json;
 using namespace std;
@@ -32,6 +32,7 @@ public:
         startMqttLoop();
         connectToDatabase();
         lastMessageTime_ = chrono::system_clock::now();
+        cout << "Client MQTT connecte et pret." << endl;
     }
 
     ~MqttClient()
@@ -46,7 +47,8 @@ public:
     void on_connect(int rc) override;
     void on_message(const struct mosquitto_message* message) override;
 
-    chrono::system_clock::time_point getLastMessageTime() const {
+    chrono::system_clock::time_point getLastMessageTime() const 
+    {
         return lastMessageTime_;
     }
 
@@ -97,6 +99,7 @@ void MqttClient::on_connect(int rc)
 {
     if (rc == 0)
     {
+        cout << "Connecte au broker MQTT." << endl;
         vector<pair<string, int>> gatewayProtocols = getGatewayNamesAndProtocolsFromDatabase();
         for (const auto& gatewayProtocol : gatewayProtocols)
         {
@@ -107,12 +110,17 @@ void MqttClient::on_connect(int rc)
             {
                 string topic = "energy/consumption/" + gatewayName + "/message/data/71435500-6791-11ce-97c6-313131303230";
                 subscribe(nullptr, topic.c_str());
+                cout << "Abonne au sujet : " << topic << endl;
             }
             else
             {
                 cout << "Passerelle " << gatewayName << " ignoree en raison de ID_Protocole_FK = " << protocolId << endl;
             }
         }
+    }
+    else
+    {
+        cout << "Erreur de connexion au broker MQTT : " << rc << endl;
     }
 }
 
@@ -123,6 +131,7 @@ void MqttClient::on_message(const struct mosquitto_message* message)
 
     if (isRelevantTopic(topic))
     {
+        cout << "Message recu sur le sujet : " << topic << endl;
         processIncomingMessage(topic, payload);
         lastMessageTime_ = chrono::system_clock::now();
     }
@@ -151,7 +160,15 @@ void MqttClient::disconnectFromMqttBroker()
 void MqttClient::connectToDatabase()
 {
     mysql_.reset(mysql_init(nullptr));
-    mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0);
+
+    if (mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0))
+    {
+        cout << "Connecte a la base de donnees." << endl;
+    }
+    else
+    {
+        cout << "Erreur de connexion a la base de donnees." << endl;
+    }
 }
 
 void MqttClient::disconnectFromDatabase()
@@ -251,7 +268,6 @@ int MqttClient::getDeviceIdFromDatabase(const string& gatewayName)
     return deviceId;
 }
 
-// Variable globale de contrôle du programme
 volatile sig_atomic_t running = 1;
 
 void signalHandler(int sig)
@@ -277,25 +293,22 @@ int main(int argc, char* argv[])
 
     while (running)
     {
-        this_thread::sleep_for(chrono::seconds(1));
+        this_thread::sleep_for(chrono::seconds(60)); // Vérification toutes les minutes
 
         auto now = chrono::system_clock::now();
         auto lastMessageTime = mqttClient.getLastMessageTime();
         auto duration = chrono::duration_cast<chrono::seconds>(now - lastMessageTime);
 
-        cout << "Secondes sans message : " << duration.count() << endl;
-
-        if (duration.count() > 60)
+        if (duration.count() > 660) // 11 minutes
         {
-            cout << "Aucun message recu depuis 1 minute, redemarrage complet du programme..." << endl;
+            cout << "Aucun message recu depuis 11 minutes, redemarrage complet du programme..." << endl;
             // Remplacement de l'image du processus par une nouvelle instance du programme
             execvp(argv[0], argv);
-            
+
             // Si execvp échoue, on affiche l'erreur et on sort de la boucle
             cerr << "Erreur lors du redemarrage : " << strerror(errno) << endl;
             break;
         }
     }
-
     return 0;
 }
