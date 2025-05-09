@@ -19,18 +19,105 @@
 using json = nlohmann::json;
 using namespace std;
 
+// Classe CDatabase
+class CDatabase
+{
+public:
+    CDatabase(const string& dbHost, const string& dbUser, const string& dbPassword, const string& dbName)
+        : dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName),
+          mysql_(nullptr, mysql_close)
+    {
+        connectToDatabase();
+    }
+
+    ~CDatabase()
+    {
+        disconnectFromDatabase();
+    }
+
+    vector<pair<string, int>> getGatewayNamesAndProtocols();
+    int getDeviceId(const string& gatewayName);
+    void insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId);
+
+private:
+    string dbHost_;
+    string dbUser_;
+    string dbPassword_;
+    string dbName_;
+    unique_ptr<MYSQL, decltype(&mysql_close)> mysql_;
+
+    void connectToDatabase();
+    void disconnectFromDatabase();
+};
+
+vector<pair<string, int>> CDatabase::getGatewayNamesAndProtocols()
+{
+    vector<pair<string, int>> gatewayProtocols;
+    string query = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
+    mysql_query(mysql_.get(), query.c_str());
+
+    MYSQL_RES* result = mysql_store_result(mysql_.get());
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(result))) {
+        gatewayProtocols.emplace_back(row[0], stoi(row[1]));
+    }
+    mysql_free_result(result);
+    return gatewayProtocols;
+}
+
+int CDatabase::getDeviceId(const string& gatewayName)
+{
+    string query = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + gatewayName + "' LIMIT 1";
+
+    mysql_query(mysql_.get(), query.c_str());
+    MYSQL_RES* result = mysql_store_result(mysql_.get());
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (!row)
+    {
+        mysql_free_result(result);
+        return -1;
+    }
+    int deviceId = stoi(row[0]);
+    mysql_free_result(result);
+
+    return deviceId;
+}
+
+void CDatabase::insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId)
+{
+    stringstream queryStream;
+    queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
+                << utcTimestamp << "), " << differenceKWh << ", " << deviceId << ")";
+
+    const string& query = queryStream.str();
+    mysql_query(mysql_.get(), query.c_str());
+}
+
+void CDatabase::connectToDatabase()
+{
+    mysql_.reset(mysql_init(nullptr));
+
+    if (mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0)) {
+        cout << "Connecte a la base de donnees." << endl;
+    } else {
+        cout << "Erreur de connexion a la base de donnees." << endl;
+    }
+}
+
+void CDatabase::disconnectFromDatabase()
+{
+    mysql_.reset();
+}
+
+// Classe MqttClient
 class MqttClient : public mosqpp::mosquittopp
 {
 public:
-    MqttClient(const string& clientId, const string& mqttHost, int mqttPort,
-               const string& dbHost, const string& dbUser, const string& dbPassword, const string& dbName)
-        : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort),
-          dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName),
-          mysql_(nullptr, mysql_close)
+    MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager)
+        : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort), dbManager_(dbManager), messageCount_(0)
     {
         connectToMqttBroker();
         startMqttLoop();
-        connectToDatabase();
         lastMessageTime_ = chrono::system_clock::now();
         cout << "Client MQTT connecte et pret." << endl;
     }
@@ -39,15 +126,12 @@ public:
     {
         stopMqttLoop();
         disconnectFromMqttBroker();
-        disconnectFromDatabase();
     }
-
-    vector<pair<string, int>> getGatewayNamesAndProtocolsFromDatabase();
 
     void on_connect(int rc) override;
     void on_message(const struct mosquitto_message* message) override;
 
-    chrono::system_clock::time_point getLastMessageTime() const 
+    chrono::system_clock::time_point getLastMessageTime() const
     {
         return lastMessageTime_;
     }
@@ -55,52 +139,29 @@ public:
 private:
     string mqttHost_;
     int mqttPort_;
-    string dbHost_;
-    string dbUser_;
-    string dbPassword_;
-    string dbName_;
-    unique_ptr<MYSQL, decltype(&mysql_close)> mysql_;
-    unordered_map<string, optional<double>> lastLoadValuesKwh_;
+    CDatabase& dbManager_;
+    unordered_map<string, vector<double>> lastLoadValuesKwh_;
     chrono::system_clock::time_point lastMessageTime_;
+    int messageCount_; // Counter for the number of messages received
 
     void connectToMqttBroker();
     void startMqttLoop();
     void stopMqttLoop();
     void disconnectFromMqttBroker();
 
-    void connectToDatabase();
-    void disconnectFromDatabase();
-
     bool isRelevantTopic(const string& topic);
     void processIncomingMessage(const string& topic, const string& payload);
     void displayMessageInTerminal(const string& payload);
-    void insertMessageDataIntoDatabase(const string& topic, const string& payload);
+    void insertMessageIntoBDD(const string& topic, const string& payload);
     string extractGatewayNameFromTopic(const string& topic);
-    int getDeviceIdFromDatabase(const string& gatewayName);
 };
-
-vector<pair<string, int>> MqttClient::getGatewayNamesAndProtocolsFromDatabase()
-{
-    vector<pair<string, int>> gatewayProtocols;
-    string query = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
-    mysql_query(mysql_.get(), query.c_str());
-
-    MYSQL_RES* result = mysql_store_result(mysql_.get());
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)))
-    {
-        gatewayProtocols.emplace_back(row[0], stoi(row[1]));
-    }
-    mysql_free_result(result);
-    return gatewayProtocols;
-}
 
 void MqttClient::on_connect(int rc)
 {
     if (rc == 0)
     {
         cout << "Connecte au broker MQTT." << endl;
-        vector<pair<string, int>> gatewayProtocols = getGatewayNamesAndProtocolsFromDatabase();
+        vector<pair<string, int>> gatewayProtocols = dbManager_.getGatewayNamesAndProtocols();
         for (const auto& gatewayProtocol : gatewayProtocols)
         {
             const string& gatewayName = gatewayProtocol.first;
@@ -157,25 +218,6 @@ void MqttClient::disconnectFromMqttBroker()
     disconnect();
 }
 
-void MqttClient::connectToDatabase()
-{
-    mysql_.reset(mysql_init(nullptr));
-
-    if (mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0))
-    {
-        cout << "Connecte a la base de donnees." << endl;
-    }
-    else
-    {
-        cout << "Erreur de connexion a la base de donnees." << endl;
-    }
-}
-
-void MqttClient::disconnectFromDatabase()
-{
-    mysql_.reset();
-}
-
 bool MqttClient::isRelevantTopic(const string& topic)
 {
     return topic.find("energy/consumption/") != string::npos;
@@ -184,7 +226,7 @@ bool MqttClient::isRelevantTopic(const string& topic)
 void MqttClient::processIncomingMessage(const string& topic, const string& payload)
 {
     displayMessageInTerminal(payload);
-    insertMessageDataIntoDatabase(topic, payload);
+    insertMessageIntoBDD(topic, payload);
 }
 
 void MqttClient::displayMessageInTerminal(const string& payload)
@@ -207,7 +249,7 @@ void MqttClient::displayMessageInTerminal(const string& payload)
     }
 }
 
-void MqttClient::insertMessageDataIntoDatabase(const string& topic, const string& payload)
+void MqttClient::insertMessageIntoBDD(const string& topic, const string& payload)
 {
     auto jsonData = json::parse(payload);
 
@@ -215,35 +257,62 @@ void MqttClient::insertMessageDataIntoDatabase(const string& topic, const string
     double currentLoadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
 
     string gatewayName = extractGatewayNameFromTopic(topic);
-    int deviceId = getDeviceIdFromDatabase(gatewayName);
+    int deviceId = dbManager_.getDeviceId(gatewayName);
 
     if (deviceId == -1)
     {
         return;
     }
 
-    if (lastLoadValuesKwh_.count(gatewayName))
+    // Stocker les trois dernières valeurs
+    if (lastLoadValuesKwh_.find(gatewayName) == lastLoadValuesKwh_.end())
     {
-        double differenceKWh = currentLoadValueKWh - lastLoadValuesKwh_[gatewayName].value();
+        lastLoadValuesKwh_[gatewayName] = {};
+    }
 
-        stringstream queryStream;
-        queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
-                    << utcTimestamp << "), " << differenceKWh << ", " << deviceId << ")";
-
-        const string& query = queryStream.str();
-        mysql_query(mysql_.get(), query.c_str());
-
-        cout << "Donnees inserees dans la bdd." << endl;
-        cout << "==============================" << endl;
+    auto& values = lastLoadValuesKwh_[gatewayName];
+    if (values.size() < 3)
+    {
+        values.push_back(currentLoadValueKWh);
     }
     else
     {
-        cout << "Premiere valeur recue pour " << gatewayName << ", insertion ignoree." << endl;
-        cout << "===================================================" << endl;
+        values.erase(values.begin());
+        values.push_back(currentLoadValueKWh);
     }
 
-    lastLoadValuesKwh_[gatewayName] = currentLoadValueKWh;
+    if (values.size() == 6)
+    {
+        double diff1 = values[1] - values[0];
+        double diff2 = values[2] - values[1];
+        double diff3 = values[3] - values[2];
+        double diff4 = values[4] - values[3];
+        double diff5 = values[5] - values[4];
+
+        double sumDiff = diff1 + diff2 + diff3 + diff4 + diff5;
+
+        messageCount_++;
+
+        if (messageCount_ >= 1)
+        {
+            dbManager_.insertMessageData(gatewayName, utcTimestamp, sumDiff, deviceId);
+            cout << "Donnees inserees dans la bdd." << endl;
+            cout << "==============================" << endl;
+
+            // Conserver la dernière valeur et effacer les autres pour recommencer le processus
+            double lastValue = values.back();
+            values.clear();
+            values.push_back(lastValue);
+            messageCount_ = 0; // Réinitialiser le compteur après insertion
+        }
+    }
+    else
+    {
+        cout << "Pas assez de valeurs pour " << gatewayName << ", insertion ignoree." << endl;
+        cout << "===================================================" << endl;
+    }
 }
+
 
 string MqttClient::extractGatewayNameFromTopic(const string& topic)
 {
@@ -252,22 +321,7 @@ string MqttClient::extractGatewayNameFromTopic(const string& topic)
     return topic.substr(start, end - start);
 }
 
-int MqttClient::getDeviceIdFromDatabase(const string& gatewayName)
-{
-    string query = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + gatewayName + "' LIMIT 1";
-    mysql_query(mysql_.get(), query.c_str());
-    MYSQL_RES* result = mysql_store_result(mysql_.get());
-    MYSQL_ROW row = mysql_fetch_row(result);
-    if (!row)
-    {
-        mysql_free_result(result);
-        return -1;
-    }
-    int deviceId = stoi(row[0]);
-    mysql_free_result(result);
-    return deviceId;
-}
-
+// Fonction principale
 volatile sig_atomic_t running = 1;
 
 void signalHandler(int sig)
@@ -289,7 +343,9 @@ int main(int argc, char* argv[])
     const string dbName = "Mesure_De";
 
     cout << "Demarrage du client MQTT..." << endl;
-    MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbHost, dbUser, dbPassword, dbName);
+
+    CDatabase dbManager(dbHost, dbUser, dbPassword, dbName);
+    MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbManager);
 
     while (running)
     {
