@@ -17,17 +17,17 @@
 using json = nlohmann::json;
 using namespace std;
 
-class CDatabase 
+class CDatabase
 {
 public:
     CDatabase(const string& dbHost, const string& dbUser, const string& dbPassword, const string& dbName)
         : dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName),
-          mysql_(nullptr, mysql_close) 
+          mysql_(nullptr, mysql_close)
     {
         connectToDatabase();
     }
 
-    ~CDatabase() 
+    ~CDatabase()
     {
         disconnectFromDatabase();
     }
@@ -44,7 +44,7 @@ private:
     void disconnectFromDatabase();
 };
 
-vector<pair<string, int>> CDatabase::getGatewayNamesAndProtocols() 
+vector<pair<string, int>> CDatabase::getGatewayNamesAndProtocols()
 {
     vector<pair<string, int>> gatewayProtocols;
     string query = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
@@ -52,20 +52,21 @@ vector<pair<string, int>> CDatabase::getGatewayNamesAndProtocols()
 
     MYSQL_RES* result = mysql_store_result(mysql_.get());
     MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result))) {
+    while ((row = mysql_fetch_row(result)))
+    {
         gatewayProtocols.emplace_back(row[0], stoi(row[1]));
     }
     mysql_free_result(result);
     return gatewayProtocols;
 }
 
-int CDatabase::getDeviceId(const string& gatewayName) 
+int CDatabase::getDeviceId(const string& gatewayName)
 {
     string query = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + gatewayName + "' LIMIT 1";
     mysql_query(mysql_.get(), query.c_str());
     MYSQL_RES* result = mysql_store_result(mysql_.get());
     MYSQL_ROW row = mysql_fetch_row(result);
-    if (!row) 
+    if (!row)
     {
         mysql_free_result(result);
         return -1;
@@ -76,7 +77,7 @@ int CDatabase::getDeviceId(const string& gatewayName)
     return deviceId;
 }
 
-void CDatabase::insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId) 
+void CDatabase::insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId)
 {
     stringstream queryStream;
     queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
@@ -84,7 +85,7 @@ void CDatabase::insertMessageData(const string& gatewayName, time_t utcTimestamp
     mysql_query(mysql_.get(), queryStream.str().c_str());
 }
 
-void CDatabase::connectToDatabase() 
+void CDatabase::connectToDatabase()
 {
     mysql_.reset(mysql_init(nullptr));
     if (mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0)) {
@@ -94,12 +95,12 @@ void CDatabase::connectToDatabase()
     }
 }
 
-void CDatabase::disconnectFromDatabase() 
+void CDatabase::disconnectFromDatabase()
 {
     mysql_.reset();
 }
 
-class MessageProcessor 
+class MessageProcessor
 {
 public:
     MessageProcessor(CDatabase& dbManager);
@@ -110,7 +111,7 @@ public:
 
 private:
     CDatabase& dbManager_;
-    double lastLoadValuesKwh_[6];
+    double lastLoadValuesKwh_[7];
     int loadValueCount_;
     int messageCount_;
 
@@ -120,20 +121,21 @@ private:
 MessageProcessor::MessageProcessor(CDatabase& dbManager)
     : dbManager_(dbManager), loadValueCount_(0), messageCount_(0) {}
 
-void MessageProcessor::processIncomingMessage(const string& topic, const string& payload) 
+void MessageProcessor::processIncomingMessage(const string& topic, const string& payload)
 {
     displayMessageInTerminal(payload);
     insertMessageIntoBDD(topic, payload);
 }
 
-void MessageProcessor::displayMessageInTerminal(const string& payload) 
+void MessageProcessor::displayMessageInTerminal(const string& payload)
 {
-    if (json::accept(payload)) 
+    if (json::accept(payload))
     {
         auto jsonData = json::parse(payload);
-        if (jsonData.contains("utctimestamp")) 
+        if (jsonData.contains("utctimestamp"))
         {
             time_t timeVal = jsonData["utctimestamp"];
+            cout << "===================================================" << endl;
             cout << "UTC Timestamp: " << put_time(gmtime(&timeVal), "%Y-%m-%d %H:%M:%S") << endl;
         }
         if (jsonData["measures"].contains("Load_0_30001"))
@@ -144,7 +146,7 @@ void MessageProcessor::displayMessageInTerminal(const string& payload)
     }
 }
 
-void MessageProcessor::insertMessageIntoBDD(const string& topic, const string& payload) 
+void MessageProcessor::insertMessageIntoBDD(const string& topic, const string& payload)
 {
     auto jsonData = json::parse(payload);
 
@@ -156,29 +158,25 @@ void MessageProcessor::insertMessageIntoBDD(const string& topic, const string& p
 
     if (deviceId == -1) return;
 
-    // Si on a moins de 6 valeurs de charge, on ajoute la nouvelle valeur
-    if (loadValueCount_ < 6) 
+    if (loadValueCount_ < 7)
     {
         lastLoadValuesKwh_[loadValueCount_++] = currentLoadValueKWh;
-    } 
-    else 
-    {   
-        // Si on a déjà 6 valeurs, on déplace les anciennes valeurs vers la gauche et on insère la nouvelle valeur à la fin
-        for (int i = 0; i < 5; ++i) 
+    }
+    else
+    {
+        for (int i = 0; i < 6; ++i)
         {
             lastLoadValuesKwh_[i] = lastLoadValuesKwh_[i + 1];
         }
-        lastLoadValuesKwh_[5] = currentLoadValueKWh;
+        lastLoadValuesKwh_[6] = currentLoadValueKWh;
     }
 
-    cout << "taille : " << loadValueCount_ << endl;
-
-    if (loadValueCount_ == 6) 
-    {                                                 
-        double diff = lastLoadValuesKwh_[5] - lastLoadValuesKwh_[0];
+    if (loadValueCount_ == 7)
+    {
+        double diff = lastLoadValuesKwh_[6] - lastLoadValuesKwh_[0];
         messageCount_++;
 
-        if (messageCount_ >= 1) 
+        if (messageCount_ >= 1)
         {
             dbManager_.insertMessageData(gatewayName, utcTimestamp, diff, deviceId);
             cout << "Données insérées dans la base de données." << endl;
@@ -188,15 +186,15 @@ void MessageProcessor::insertMessageIntoBDD(const string& topic, const string& p
             loadValueCount_ = 1;
             messageCount_ = 0;
         }
-    } 
-    else 
+    }
+    else
     {
         cout << "Pas assez de valeurs pour " << gatewayName << ", insertion ignorée." << endl;
         cout << "===================================================" << endl;
     }
 }
 
-string MessageProcessor::extractGatewayNameFromTopic(const string& topic) 
+string MessageProcessor::extractGatewayNameFromTopic(const string& topic)
 {
     size_t start = topic.find("/", 18) + 1;
     size_t end = topic.find("/", start);
@@ -206,7 +204,7 @@ string MessageProcessor::extractGatewayNameFromTopic(const string& topic)
 class MqttClient : public mosqpp::mosquittopp
 {
 public:
-    MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager);
+    MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager, const string& mqttUsername, const string& mqttPassword, char* argv[]);
     ~MqttClient();
 
     void on_connect(int rc) override;
@@ -220,7 +218,12 @@ private:
     CDatabase& dbManager_;
     MessageProcessor messageProcessor_;
     chrono::system_clock::time_point lastMessageTime_;
-    int messageCount_; 
+    chrono::system_clock::time_point lastCountedMessageTime_;
+    int messageCount_;
+    string mqttUsername_;
+    string mqttPassword_;
+    bool isFirstMessage_;
+    char** argv_;
 
     void connectToMqttBroker();
     void startMqttLoop();
@@ -230,12 +233,13 @@ private:
     bool isRelevantTopic(const string& topic);
 };
 
-MqttClient::MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager)
-    : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort), dbManager_(dbManager), messageProcessor_(dbManager), messageCount_(0)
+MqttClient::MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager, const string& mqttUsername, const string& mqttPassword, char* argv[])
+    : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort), dbManager_(dbManager), messageProcessor_(dbManager), messageCount_(0), mqttUsername_(mqttUsername), mqttPassword_(mqttPassword), isFirstMessage_(true), argv_(argv)
 {
     connectToMqttBroker();
     startMqttLoop();
     lastMessageTime_ = chrono::system_clock::now();
+    lastCountedMessageTime_ = chrono::system_clock::now();
     cout << "Client MQTT connecte et pret." << endl;
 }
 
@@ -282,13 +286,39 @@ void MqttClient::on_message(const struct mosquitto_message* message)
     if (isRelevantTopic(topic))
     {
         cout << "Message recu sur le sujet : " << topic << endl;
-        messageProcessor_.processIncomingMessage(topic, payload);
+
+        if (isFirstMessage_)
+        {
+            messageProcessor_.processIncomingMessage(topic, payload);
+            lastCountedMessageTime_ = chrono::system_clock::now();
+            isFirstMessage_ = false;
+        }
+        else
+        {
+            auto now = chrono::system_clock::now();
+            auto duration = chrono::duration_cast<chrono::seconds>(now - lastCountedMessageTime_);
+
+            if (duration.count() >= 590) // 9 minutes and 50 seconds
+            {
+                messageProcessor_.processIncomingMessage(topic, payload);
+                lastCountedMessageTime_ = now;
+            }
+            else
+            {
+                cout << "Message ignore car recu avant 9 minutes et 50 secondes. Redemarrage du programme..." << endl;
+                execvp(argv_[0], argv_);
+                cerr << "Erreur lors du redemarrage : " << strerror(errno) << endl;
+                exit(1);
+            }
+        }
+
         lastMessageTime_ = chrono::system_clock::now();
     }
 }
 
 void MqttClient::connectToMqttBroker()
 {
+    username_pw_set(mqttUsername_.c_str(), mqttPassword_.c_str());
     connect_async(mqttHost_.c_str(), mqttPort_, 60);
 }
 
@@ -331,6 +361,8 @@ int main(int argc, char* argv[])
     const string mqttHost = "217.182.60.210";
     int mqttPort = 1883;
     const string mqttClientId = "cpp_mqtt_client";
+    const string mqttUsername = "adminsn";
+    const string mqttPassword = "admincielir";
 
     const string dbHost = "217.182.60.210";
     const string dbUser = "admin";
@@ -340,7 +372,7 @@ int main(int argc, char* argv[])
     cout << "Demarrage du client MQTT..." << endl;
 
     CDatabase dbManager(dbHost, dbUser, dbPassword, dbName);
-    MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbManager);
+    MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbManager, mqttUsername, mqttPassword, argv);
 
     while (running)
     {
@@ -350,7 +382,7 @@ int main(int argc, char* argv[])
         auto lastMessageTime = mqttClient.getLastMessageTime();
         auto duration = chrono::duration_cast<chrono::seconds>(now - lastMessageTime);
 
-        if (duration.count() > 660)
+        if (duration.count() > 660) // 11 minutes
         {
             cout << "Aucun message recu depuis 11 minutes, redemarrage complet du programme..." << endl;
             execvp(argv[0], argv);
