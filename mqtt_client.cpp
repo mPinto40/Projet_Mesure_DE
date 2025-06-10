@@ -14,261 +14,385 @@
 #include <unistd.h>
 #include <cstring>
 
+// Utilisation de la bibliothèque json de nlohmann pour le parsing JSON
 using json = nlohmann::json;
 using namespace std;
 
-class CDatabase
+// Classe pour gérer la connexion à la base de données MySQL
+class GestionnaireBaseDeDonnees
 {
 public:
-    CDatabase(const string& dbHost, const string& dbUser, const string& dbPassword, const string& dbName)
-        : dbHost_(dbHost), dbUser_(dbUser), dbPassword_(dbPassword), dbName_(dbName),
+    // Constructeur pour initialiser la connexion à la base de données
+    GestionnaireBaseDeDonnees(const string& hoteBD, const string& utilisateurBD, const string& motDePasseBD, const string& nomBD)
+        : hoteBD_(hoteBD), utilisateurBD_(utilisateurBD), motDePasseBD_(motDePasseBD), nomBD_(nomBD),
           mysql_(nullptr, mysql_close)
     {
-        connectToDatabase();
+        connecterBaseDeDonnees(); // Connexion à la base de données lors de l'initialisation
     }
 
-    ~CDatabase()
+    // Destructeur pour fermer la connexion à la base de données
+    ~GestionnaireBaseDeDonnees()
     {
-        disconnectFromDatabase();
+        deconnecterBaseDeDonnees();
     }
 
-    vector<pair<string, int>> getGatewayNamesAndProtocols();
-    int getDeviceId(const string& gatewayName);
-    void insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId);
+    // Méthode pour obtenir les noms des passerelles et leurs protocoles
+    vector<pair<string, int>> obtenirNomsPasserellesEtProtocoles();
+
+    // Méthode pour obtenir l'ID d'un dispositif à partir de son nom
+    int obtenirIdDispositif(const string& nomPasserelle);
+
+    // Méthode pour insérer des données de mesure dans la base de données
+    void insererDonneesMessage(const string& nomPasserelle, time_t horodatageUTC, double differenceKWh, int idDispositif);
 
 private:
-    string dbHost_, dbUser_, dbPassword_, dbName_;
+    string hoteBD_, utilisateurBD_, motDePasseBD_, nomBD_;
     unique_ptr<MYSQL, decltype(&mysql_close)> mysql_;
 
-    void connectToDatabase();
-    void disconnectFromDatabase();
+    // Méthode pour établir la connexion à la base de données
+    void connecterBaseDeDonnees();
+
+    // Méthode pour fermer la connexion à la base de données
+    void deconnecterBaseDeDonnees();
 };
 
-vector<pair<string, int>> CDatabase::getGatewayNamesAndProtocols()
+// Implémentation de la méthode pour obtenir les noms des passerelles et leurs protocoles
+vector<pair<string, int>> GestionnaireBaseDeDonnees::obtenirNomsPasserellesEtProtocoles()
 {
-    vector<pair<string, int>> gatewayProtocols;
-    string query = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
-    mysql_query(mysql_.get(), query.c_str());
+    vector<pair<string, int>> protocolesPasserelles;
+    string requete = "SELECT Nom_dispositif, ID_Protocole_FK FROM Dispositif_Passerelle";
+    mysql_query(mysql_.get(), requete.c_str());
 
-    MYSQL_RES* result = mysql_store_result(mysql_.get());
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)))
+    MYSQL_RES* resultat = mysql_store_result(mysql_.get());
+    MYSQL_ROW ligne;
+    while ((ligne = mysql_fetch_row(resultat)))
     {
-        gatewayProtocols.emplace_back(row[0], stoi(row[1]));
+        protocolesPasserelles.emplace_back(ligne[0], stoi(ligne[1]));
     }
-    mysql_free_result(result);
-    return gatewayProtocols;
+    mysql_free_result(resultat);
+    return protocolesPasserelles;
 }
 
-int CDatabase::getDeviceId(const string& gatewayName)
+// Implémentation de la méthode pour obtenir l'ID d'un dispositif
+int GestionnaireBaseDeDonnees::obtenirIdDispositif(const string& nomPasserelle)
 {
-    string query = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + gatewayName + "' LIMIT 1";
-    mysql_query(mysql_.get(), query.c_str());
-    MYSQL_RES* result = mysql_store_result(mysql_.get());
-    MYSQL_ROW row = mysql_fetch_row(result);
-    if (!row)
+    string requete = "SELECT ID_Dispositif_PK FROM Dispositif_Passerelle WHERE Nom_dispositif = '" + nomPasserelle + "' LIMIT 1";
+    mysql_query(mysql_.get(), requete.c_str());
+    MYSQL_RES* resultat = mysql_store_result(mysql_.get());
+    MYSQL_ROW ligne = mysql_fetch_row(resultat);
+    if (!ligne)
     {
-        mysql_free_result(result);
+        mysql_free_result(resultat);
         return -1;
     }
-    int deviceId = stoi(row[0]);
-    mysql_free_result(result);
+    int idDispositif = stoi(ligne[0]);
+    mysql_free_result(resultat);
 
-    return deviceId;
+    return idDispositif;
 }
 
-void CDatabase::insertMessageData(const string& gatewayName, time_t utcTimestamp, double differenceKWh, int deviceId)
+// Implémentation de la méthode pour insérer des données de mesure
+void GestionnaireBaseDeDonnees::insererDonneesMessage(const string& nomPasserelle, time_t horodatageUTC, double differenceKWh, int idDispositif)
 {
-    stringstream queryStream;
-    queryStream << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
-                << utcTimestamp << "), " << differenceKWh << ", " << deviceId << ")";
-    mysql_query(mysql_.get(), queryStream.str().c_str());
+    stringstream fluxRequete;
+    fluxRequete << "INSERT INTO Donnee_Mesurer (Timestamp, Valeur_Mesure, ID_Dispositif_FK) VALUES (FROM_UNIXTIME("
+                << horodatageUTC << "), " << differenceKWh << ", " << idDispositif << ")";
+    mysql_query(mysql_.get(), fluxRequete.str().c_str());
 }
 
-void CDatabase::connectToDatabase()
+// Implémentation de la méthode pour établir la connexion à la base de données
+void GestionnaireBaseDeDonnees::connecterBaseDeDonnees()
 {
     mysql_.reset(mysql_init(nullptr));
-    if (mysql_real_connect(mysql_.get(), dbHost_.c_str(), dbUser_.c_str(), dbPassword_.c_str(), dbName_.c_str(), 0, nullptr, 0)) {
-        cout << "Connecte a la base de donnees." << endl;
+    if (!mysql_real_connect(mysql_.get(), hoteBD_.c_str(), utilisateurBD_.c_str(), motDePasseBD_.c_str(), nomBD_.c_str(), 0, nullptr, 0)) {
+        cerr << "Erreur de connexion à la base de données: " << mysql_error(mysql_.get()) << endl;
     } else {
-        cout << "Erreur de connexion a la base de donnees." << endl;
+        cout << "Connecté à la base de données." << endl;
     }
 }
 
-void CDatabase::disconnectFromDatabase()
+// Implémentation de la méthode pour fermer la connexion à la base de données
+void GestionnaireBaseDeDonnees::deconnecterBaseDeDonnees()
 {
-    mysql_.reset();
+    if (mysql_) {
+        mysql_close(mysql_.release());
+    }
 }
 
-class MessageProcessor
+// Structure pour stocker les données de la passerelle
+struct DonneesPasserelle
 {
-public:
-    MessageProcessor(CDatabase& dbManager);
+    string nom;
+    double dernieresValeursChargeKwh[7]; 
+    double derniereValeurBaseChargeKwh;
+    int compteurValeursCharge;
+    int compteurMessages; 
+    string dernierMessageTraite; 
+    int totalMessagesRecus; 
 
-    void processIncomingMessage(const string& topic, const string& payload);
-    void displayMessageInTerminal(const string& payload);
-    void insertMessageIntoBDD(const string& topic, const string& payload);
-
-private:
-    CDatabase& dbManager_;
-    double lastLoadValuesKwh_[7];
-    int loadValueCount_;
-    int messageCount_;
-
-    string extractGatewayNameFromTopic(const string& topic);
+    // Constructeur pour initialiser les données de la passerelle
+    DonneesPasserelle(const string& nomPasserelle)
+        : nom(nomPasserelle), compteurValeursCharge(0), compteurMessages(0), dernierMessageTraite(""), totalMessagesRecus(0), derniereValeurBaseChargeKwh(0.0)
+    {
+        for (int i = 0; i < 7; ++i)
+        {
+            dernieresValeursChargeKwh[i] = 0.0;
+        }
+    }
 };
 
-MessageProcessor::MessageProcessor(CDatabase& dbManager)
-    : dbManager_(dbManager), loadValueCount_(0), messageCount_(0) {}
-
-void MessageProcessor::processIncomingMessage(const string& topic, const string& payload)
+// Classe pour traiter les messages entrants
+class TraitementMessage
 {
-    displayMessageInTerminal(payload);
-    insertMessageIntoBDD(topic, payload);
+public:
+    // Constructeur pour initialiser le traitement des messages
+    TraitementMessage(GestionnaireBaseDeDonnees& gestionnaireBD);
+
+    // Méthode pour traiter un message entrant
+    void traiterMessageEntrant(const string& sujet, const string& chargeUtile);
+
+    // Méthode pour afficher un message dans le terminal
+    void afficherMessageDansTerminal(const string& chargeUtile);
+
+    // Méthode pour insérer un message dans la base de données
+    void insererMessageDansBDD(const string& sujet, const string& chargeUtile);
+
+    // Méthode pour extraire le nom de la passerelle à partir du sujet
+    string extraireNomPasserelleDuSujet(const string& sujet);
+
+private:
+    GestionnaireBaseDeDonnees& gestionnaireBD_;
+    vector<DonneesPasserelle> etatsPasserelles_;
+};
+
+// Implémentation du constructeur pour initialiser le traitement des messages
+TraitementMessage::TraitementMessage(GestionnaireBaseDeDonnees& gestionnaireBD)
+    : gestionnaireBD_(gestionnaireBD) {}
+
+// Implémentation de la méthode pour traiter un message entrant
+void TraitementMessage::traiterMessageEntrant(const string& sujet, const string& chargeUtile)
+{
+    afficherMessageDansTerminal(chargeUtile);
+    insererMessageDansBDD(sujet, chargeUtile);
 }
 
-void MessageProcessor::displayMessageInTerminal(const string& payload)
+// Implémentation de la méthode pour afficher un message dans le terminal
+void TraitementMessage::afficherMessageDansTerminal(const string& chargeUtile)
 {
-    if (json::accept(payload))
+    if (json::accept(chargeUtile))
     {
-        auto jsonData = json::parse(payload);
-        if (jsonData.contains("utctimestamp"))
+        auto donneesJson = json::parse(chargeUtile);
+        if (donneesJson.contains("utctimestamp"))
         {
-            time_t timeVal = jsonData["utctimestamp"];
-            cout << "===================================================" << endl;
-            cout << "UTC Timestamp: " << put_time(gmtime(&timeVal), "%Y-%m-%d %H:%M:%S") << endl;
+            time_t valeurTemps = donneesJson["utctimestamp"];
+            cout << "Horodatage UTC: " << put_time(gmtime(&valeurTemps), "%Y-%m-%d %H:%M:%S") << endl;
         }
-        if (jsonData["measures"].contains("Load_0_30001"))
+        if (donneesJson["measures"].contains("Load_0_30001") && donneesJson["measures"].contains("Load_0_30000"))
         {
-            double loadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
-            cout << "Load_0_30001: " << loadValueKWh << " kWh" << endl;
+            double valeurChargeKWh = donneesJson["measures"]["Load_0_30001"].get<double>() / 1000.0;
+            double valeurBaseChargeKWh = donneesJson["measures"]["Load_0_30000"].get<double>() / 1000.0;
+            cout << "Load_0_30001: " << valeurChargeKWh << " kWh" << endl;
+            cout << "Load_0_30000: " << valeurBaseChargeKWh << " kWh" << endl;
         }
     }
 }
 
-void MessageProcessor::insertMessageIntoBDD(const string& topic, const string& payload)
+// Implémentation de la méthode pour insérer un message dans la base de données
+void TraitementMessage::insererMessageDansBDD(const string& sujet, const string& chargeUtile)
 {
-    auto jsonData = json::parse(payload);
+    auto donneesJson = json::parse(chargeUtile);
 
-    time_t utcTimestamp = jsonData["utctimestamp"];
-    double currentLoadValueKWh = jsonData["measures"]["Load_0_30001"].get<double>() / 1000.0;
+    time_t horodatageUTC = donneesJson["utctimestamp"];
+    double valeurChargeActuelleKWh = donneesJson["measures"]["Load_0_30001"].get<double>() / 1000.0;
+    double valeurBaseChargeActuelleKWh = donneesJson["measures"]["Load_0_30000"].get<double>() / 1000.0;
 
-    string gatewayName = extractGatewayNameFromTopic(topic);
-    int deviceId = dbManager_.getDeviceId(gatewayName);
+    string nomPasserelle = extraireNomPasserelleDuSujet(sujet);
+    int idDispositif = gestionnaireBD_.obtenirIdDispositif(nomPasserelle);
 
-    if (deviceId == -1) return;
+    if (idDispositif == -1) return;
 
-    if (loadValueCount_ < 7)
+    auto it = std::find_if(etatsPasserelles_.begin(), etatsPasserelles_.end(),
+                           [&nomPasserelle](const DonneesPasserelle& ep) {
+                               return ep.nom == nomPasserelle;
+                           });
+
+    if (it == etatsPasserelles_.end())
     {
-        lastLoadValuesKwh_[loadValueCount_++] = currentLoadValueKWh;
+        etatsPasserelles_.emplace_back(nomPasserelle);
+        it = etatsPasserelles_.end() - 1;
+    }
+
+    if (chargeUtile == it->dernierMessageTraite)
+    {
+        cout << "Message déjà traité pour " << nomPasserelle << ", ignoré." << endl;
+        cout << "=======================================================" << endl;
+        return;
+    }
+
+    if (it->compteurValeursCharge < 7)
+    {
+        it->dernieresValeursChargeKwh[it->compteurValeursCharge++] = valeurChargeActuelleKWh + valeurBaseChargeActuelleKWh;
     }
     else
     {
         for (int i = 0; i < 6; ++i)
         {
-            lastLoadValuesKwh_[i] = lastLoadValuesKwh_[i + 1];
+            it->dernieresValeursChargeKwh[i] = it->dernieresValeursChargeKwh[i + 1];
         }
-        lastLoadValuesKwh_[6] = currentLoadValueKWh;
+        it->dernieresValeursChargeKwh[6] = valeurChargeActuelleKWh + valeurBaseChargeActuelleKWh;
     }
 
-    if (loadValueCount_ == 7)
-    {
-        double diff = lastLoadValuesKwh_[6] - lastLoadValuesKwh_[0];
-        messageCount_++;
+    it->totalMessagesRecus++;
+    cout << "Message reçu : " << it->totalMessagesRecus << endl;
 
-        if (messageCount_ >= 1)
+    if (it->compteurValeursCharge == 7)
+    {
+        double diff = it->dernieresValeursChargeKwh[6] - it->dernieresValeursChargeKwh[0];
+        it->compteurMessages++;
+
+        if (it->compteurMessages >= 1)
         {
-            dbManager_.insertMessageData(gatewayName, utcTimestamp, diff, deviceId);
-            cout << "Données insérées dans la base de données." << endl;
+            gestionnaireBD_.insererDonneesMessage(nomPasserelle, horodatageUTC, diff, idDispositif);
+            cout << "Données insérées dans la base de données pour " << nomPasserelle << "." << endl;
             cout << "==============================" << endl;
 
-            lastLoadValuesKwh_[0] = lastLoadValuesKwh_[5];
-            loadValueCount_ = 1;
-            messageCount_ = 0;
+            it->dernieresValeursChargeKwh[0] = it->dernieresValeursChargeKwh[6];
+            it->compteurValeursCharge = 1;
+            it->compteurMessages = 0;
         }
     }
     else
     {
-        cout << "Pas assez de valeurs pour " << gatewayName << ", insertion ignorée." << endl;
+        cout << "Pas assez de valeurs pour " << nomPasserelle << ", insertion ignorée." << endl;
         cout << "===================================================" << endl;
     }
+
+    it->dernierMessageTraite = chargeUtile;
 }
 
-string MessageProcessor::extractGatewayNameFromTopic(const string& topic)
+// Implémentation de la méthode pour extraire le nom de la passerelle à partir du sujet
+string TraitementMessage::extraireNomPasserelleDuSujet(const string& sujet)
 {
-    size_t start = topic.find("/", 18) + 1;
-    size_t end = topic.find("/", start);
-    return topic.substr(start, end - start);
+    size_t debut = sujet.find("/", 18) + 1;
+    size_t fin = sujet.find("/", debut);
+    return sujet.substr(debut, fin - debut);
 }
 
-class MqttClient : public mosqpp::mosquittopp
+// Classe pour gérer le client MQTT
+class ClientMQTT : public mosqpp::mosquittopp
 {
 public:
-    MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager, const string& mqttUsername, const string& mqttPassword, char* argv[]);
-    ~MqttClient();
+    ClientMQTT(const string& idClient, const string& hoteMQTT, int portMQTT, GestionnaireBaseDeDonnees& gestionnaireBD, const string& nomUtilisateurMQTT, const string& motDePasseMQTT, char* argv[]);
 
+    ~ClientMQTT();
+
+    // Méthode appelée lors de la connexion au broker MQTT
     void on_connect(int rc) override;
+
+    // Méthode appelée lors de la réception d'un message MQTT
     void on_message(const struct mosquitto_message* message) override;
 
-    chrono::system_clock::time_point getLastMessageTime() const;
+    chrono::system_clock::time_point obtenirDernierTempsMessage() const;
+
+    void rafraichirAbonnementsPasserelles();
+
+    void verifierChangementsPasserelles();
 
 private:
-    string mqttHost_;
-    int mqttPort_;
-    CDatabase& dbManager_;
-    MessageProcessor messageProcessor_;
-    chrono::system_clock::time_point lastMessageTime_;
-    chrono::system_clock::time_point lastCountedMessageTime_;
-    int messageCount_;
-    string mqttUsername_;
-    string mqttPassword_;
-    bool isFirstMessage_;
+    string hoteMQTT_;
+    int portMQTT_;
+    GestionnaireBaseDeDonnees& gestionnaireBD_;
+    TraitementMessage processeurMessage_;
+    chrono::system_clock::time_point dernierTempsMessage_;
+    string nomUtilisateurMQTT_;
+    string motDePasseMQTT_;
     char** argv_;
+    bool estEnRafraichissementAbonnements_;
+    static vector<pair<string, int>> passerellesPrecedentes;
 
-    void connectToMqttBroker();
-    void startMqttLoop();
-    void stopMqttLoop();
-    void disconnectFromMqttBroker();
+    void connecterAuBrokerMQTT();
 
-    bool isRelevantTopic(const string& topic);
+    void demarrerBoucleMQTT();
+
+    void arreterBoucleMQTT();
+
+    void deconnecterDuBrokerMQTT();
+
+    bool estSujetPertinent(const string& sujet);
 };
 
-MqttClient::MqttClient(const string& clientId, const string& mqttHost, int mqttPort, CDatabase& dbManager, const string& mqttUsername, const string& mqttPassword, char* argv[])
-    : mosquittopp(clientId.c_str()), mqttHost_(mqttHost), mqttPort_(mqttPort), dbManager_(dbManager), messageProcessor_(dbManager), messageCount_(0), mqttUsername_(mqttUsername), mqttPassword_(mqttPassword), isFirstMessage_(true), argv_(argv)
+// Initialisation du vecteur statique pour stocker les passerelles précédentes
+vector<pair<string, int>> ClientMQTT::passerellesPrecedentes;
+
+// Implémentation du constructeur pour initialiser le client MQTT
+ClientMQTT::ClientMQTT(const string& idClient, const string& hoteMQTT, int portMQTT, GestionnaireBaseDeDonnees& gestionnaireBD, const string& nomUtilisateurMQTT, const string& motDePasseMQTT, char* argv[])
+    : mosquittopp(idClient.c_str()), hoteMQTT_(hoteMQTT), portMQTT_(portMQTT), gestionnaireBD_(gestionnaireBD), processeurMessage_(gestionnaireBD), nomUtilisateurMQTT_(nomUtilisateurMQTT), motDePasseMQTT_(motDePasseMQTT), argv_(argv), estEnRafraichissementAbonnements_(false)
 {
-    connectToMqttBroker();
-    startMqttLoop();
-    lastMessageTime_ = chrono::system_clock::now();
-    lastCountedMessageTime_ = chrono::system_clock::now();
-    cout << "Client MQTT connecte et pret." << endl;
+    connecterAuBrokerMQTT();
+    demarrerBoucleMQTT();
+    dernierTempsMessage_ = chrono::system_clock::now();
+    cout << "Client MQTT connecté et prêt." << endl;
 }
 
-MqttClient::~MqttClient()
+// Implémentation du destructeur pour nettoyer les ressources du client MQTT
+ClientMQTT::~ClientMQTT()
 {
-    stopMqttLoop();
-    disconnectFromMqttBroker();
+    arreterBoucleMQTT();
+    deconnecterDuBrokerMQTT();
 }
 
-void MqttClient::on_connect(int rc)
+// Implémentation de la méthode pour vérifier les changements dans les passerelles
+void ClientMQTT::verifierChangementsPasserelles()
+{
+    vector<pair<string, int>> passerellesActuelles = gestionnaireBD_.obtenirNomsPasserellesEtProtocoles();
+
+    for (const auto& passerelleActuelle : passerellesActuelles)
+    {
+        bool trouve = false;
+        for (const auto& passerellePrecedente : passerellesPrecedentes)
+        {
+            if (passerelleActuelle.first == passerellePrecedente.first && passerelleActuelle.second == passerellePrecedente.second)
+            {
+                trouve = true;
+                break;
+            }
+        }
+
+        if (!trouve)
+        {
+            if (passerelleActuelle.second == 1)
+            {
+                string sujet = "energy/consumption/" + passerelleActuelle.first + "/message/data/71435500-6791-11ce-97c6-313131303230";
+                subscribe(nullptr, sujet.c_str());
+                cout << "Nouvel abonnement au sujet : " << sujet << endl;
+            }
+        }
+    }
+
+    passerellesPrecedentes = passerellesActuelles;
+}
+
+// Implémentation de la méthode appelée lors de la connexion au broker MQTT
+void ClientMQTT::on_connect(int rc)
 {
     if (rc == 0)
     {
-        cout << "Connecte au broker MQTT." << endl;
-        vector<pair<string, int>> gatewayProtocols = dbManager_.getGatewayNamesAndProtocols();
-        for (const auto& gatewayProtocol : gatewayProtocols)
+        cout << "Connecté au broker MQTT." << endl;
+        vector<pair<string, int>> protocolesPasserelles = gestionnaireBD_.obtenirNomsPasserellesEtProtocoles();
+        for (const auto& protocolePasserelle : protocolesPasserelles)
         {
-            const string& gatewayName = gatewayProtocol.first;
-            int protocolId = gatewayProtocol.second;
+            const string& nomPasserelle = protocolePasserelle.first;
+            int idProtocole = protocolePasserelle.second;
 
-            if (protocolId == 1)
+            if (idProtocole == 1)
             {
-                string topic = "energy/consumption/" + gatewayName + "/message/data/71435500-6791-11ce-97c6-313131303230";
-                subscribe(nullptr, topic.c_str());
-                cout << "Abonne au sujet : " << topic << endl;
+                string sujet = "energy/consumption/" + nomPasserelle + "/message/data/71435500-6791-11ce-97c6-313131303230";
+                subscribe(nullptr, sujet.c_str());
+                cout << "Abonné au sujet : " << sujet << endl;
             }
             else
             {
-                cout << "Passerelle " << gatewayName << " ignoree en raison de ID_Protocole_FK = " << protocolId << endl;
+                cout << "Passerelle " << nomPasserelle << " ignorée en raison de ID_Protocole_FK = " << idProtocole << endl;
             }
         }
     }
@@ -278,117 +402,134 @@ void MqttClient::on_connect(int rc)
     }
 }
 
-void MqttClient::on_message(const struct mosquitto_message* message)
+// Implémentation de la méthode appelée lors de la réception d'un message MQTT
+void ClientMQTT::on_message(const struct mosquitto_message* message)
 {
-    string topic = message->topic;
-    string payload(static_cast<char*>(message->payload), message->payloadlen);
+    string sujet = message->topic;
+    string chargeUtile(static_cast<char*>(message->payload), message->payloadlen);
 
-    if (isRelevantTopic(topic))
+    if (estSujetPertinent(sujet) && !estEnRafraichissementAbonnements_)
     {
-        cout << "Message recu sur le sujet : " << topic << endl;
-
-        if (isFirstMessage_)
-        {
-            messageProcessor_.processIncomingMessage(topic, payload);
-            lastCountedMessageTime_ = chrono::system_clock::now();
-            isFirstMessage_ = false;
-        }
-        else
-        {
-            auto now = chrono::system_clock::now();
-            auto duration = chrono::duration_cast<chrono::seconds>(now - lastCountedMessageTime_);
-
-            if (duration.count() >= 590) // 9 minutes and 50 seconds
-            {
-                messageProcessor_.processIncomingMessage(topic, payload);
-                lastCountedMessageTime_ = now;
-            }
-            else
-            {
-                cout << "Message ignore car recu avant 9 minutes et 50 secondes. Redemarrage du programme..." << endl;
-                execvp(argv_[0], argv_);
-                cerr << "Erreur lors du redemarrage : " << strerror(errno) << endl;
-                exit(1);
-            }
-        }
-
-        lastMessageTime_ = chrono::system_clock::now();
+        cout << "Message reçu sur le sujet : " << sujet << endl;
+        processeurMessage_.traiterMessageEntrant(sujet, chargeUtile);
+        dernierTempsMessage_ = chrono::system_clock::now();
     }
 }
 
-void MqttClient::connectToMqttBroker()
+// Implémentation de la méthode pour rafraîchir les abonnements aux passerelles
+void ClientMQTT::rafraichirAbonnementsPasserelles()
 {
-    username_pw_set(mqttUsername_.c_str(), mqttPassword_.c_str());
-    connect_async(mqttHost_.c_str(), mqttPort_, 60);
+    estEnRafraichissementAbonnements_ = true;
+    vector<pair<string, int>> protocolesPasserelles = gestionnaireBD_.obtenirNomsPasserellesEtProtocoles();
+    for (const auto& protocolePasserelle : protocolesPasserelles)
+    {
+        const string& nomPasserelle = protocolePasserelle.first;
+        int idProtocole = protocolePasserelle.second;
+
+        if (idProtocole == 1)
+        {
+            string sujet = "energy/consumption/" + nomPasserelle + "/message/data/71435500-6791-11ce-97c6-313131303230";
+            subscribe(nullptr, sujet.c_str());
+            cout << "Abonné au sujet : " << sujet << endl;
+        }
+        else
+        {
+            cout << "Passerelle " << nomPasserelle << " ignorée en raison de ID_Protocole_FK = " << idProtocole << endl;
+        }
+    }
+    estEnRafraichissementAbonnements_ = false;
 }
 
-void MqttClient::startMqttLoop()
+
+void ClientMQTT::connecterAuBrokerMQTT()
+{
+    username_pw_set(nomUtilisateurMQTT_.c_str(), motDePasseMQTT_.c_str());
+    connect_async(hoteMQTT_.c_str(), portMQTT_, 60);
+}
+
+
+void ClientMQTT::demarrerBoucleMQTT()
 {
     loop_start();
 }
 
-void MqttClient::stopMqttLoop()
+
+void ClientMQTT::arreterBoucleMQTT()
 {
     loop_stop();
 }
 
-void MqttClient::disconnectFromMqttBroker()
+
+void ClientMQTT::deconnecterDuBrokerMQTT()
 {
     disconnect();
 }
 
-bool MqttClient::isRelevantTopic(const string& topic)
+
+bool ClientMQTT::estSujetPertinent(const string& sujet)
 {
-    return topic.find("energy/consumption/") != string::npos;
+    return sujet.find("energy/consumption/") != string::npos;
 }
 
-chrono::system_clock::time_point MqttClient::getLastMessageTime() const
+// Implémentation de la méthode pour obtenir le dernier temps de réception de message
+chrono::system_clock::time_point ClientMQTT::obtenirDernierTempsMessage() const
 {
-    return lastMessageTime_;
+    return dernierTempsMessage_;
 }
 
-volatile sig_atomic_t running = 1;
+// Variable globale pour gérer l'état d'exécution du programme
+volatile sig_atomic_t enExecution = 1;
 
-void signalHandler(int sig)
+// Gestionnaire de signal pour arrêter le programme
+void gestionnaireSignal(int sig)
 {
-    running = 0;
+    enExecution = 0;
 }
 
+// Fonction principale pour exécuter le programme
+void executerProgramme(int argc, char* argv[])
+{
+    const string hoteMQTT = "217.182.60.210";
+    int portMQTT = 1883;
+    const string idClientMQTT = "cpp_mqtt_client";
+    const string nomUtilisateurMQTT = "adminsn";
+    const string motDePasseMQTT = "admincielir";
+
+    const string hoteBD = "217.182.60.210";
+    const string utilisateurBD = "etudiant";
+    const string motDePasseBD = "admincielir";
+    const string nomBD = "Mesure_De";
+
+    cout << "Démarrage du client MQTT..." << endl;
+
+    GestionnaireBaseDeDonnees gestionnaireBD(hoteBD, utilisateurBD, motDePasseBD, nomBD);
+    ClientMQTT clientMQTT(idClientMQTT, hoteMQTT, portMQTT, gestionnaireBD, nomUtilisateurMQTT, motDePasseMQTT, argv);
+
+    while (enExecution)
+    {
+        this_thread::sleep_for(chrono::minutes(1));
+
+        auto maintenant = chrono::system_clock::now();
+        auto dernierTempsMessage = clientMQTT.obtenirDernierTempsMessage();
+        auto tempsDepuisDernierMessage = chrono::duration_cast<chrono::minutes>(maintenant - dernierTempsMessage).count();
+
+        if (tempsDepuisDernierMessage >= 11)
+        {
+            cout << "Aucun message reçu depuis 11 minutes. Rafraîchissement des abonnements..." << endl;
+            cout << "=========================================================================" << endl;
+            clientMQTT.rafraichirAbonnementsPasserelles();
+        }
+
+        clientMQTT.verifierChangementsPasserelles();
+    }
+}
+
+// Fonction principale du programme
 int main(int argc, char* argv[])
 {
-    signal(SIGINT, signalHandler);
+    signal(SIGINT, gestionnaireSignal);
 
-    const string mqttHost = "217.182.60.210";
-    int mqttPort = 1883;
-    const string mqttClientId = "cpp_mqtt_client";
-    const string mqttUsername = "adminsn";
-    const string mqttPassword = "admincielir";
+    executerProgramme(argc, argv);
 
-    const string dbHost = "217.182.60.210";
-    const string dbUser = "admin";
-    const string dbPassword = "admin";
-    const string dbName = "Mesure_De";
-
-    cout << "Demarrage du client MQTT..." << endl;
-
-    CDatabase dbManager(dbHost, dbUser, dbPassword, dbName);
-    MqttClient mqttClient(mqttClientId, mqttHost, mqttPort, dbManager, mqttUsername, mqttPassword, argv);
-
-    while (running)
-    {
-        this_thread::sleep_for(chrono::seconds(60));
-
-        auto now = chrono::system_clock::now();
-        auto lastMessageTime = mqttClient.getLastMessageTime();
-        auto duration = chrono::duration_cast<chrono::seconds>(now - lastMessageTime);
-
-        if (duration.count() > 660) // 11 minutes
-        {
-            cout << "Aucun message recu depuis 11 minutes, redemarrage complet du programme..." << endl;
-            execvp(argv[0], argv);
-            cerr << "Erreur lors du redemarrage : " << strerror(errno) << endl;
-            break;
-        }
-    }
     return 0;
 }
